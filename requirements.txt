@@ -38,8 +38,6 @@ PyJWT==2.7.0
 pyOpenSSL==23.2.0
 pyparsing==3.1.1
 pyrsistent==0.20.0
-pyserial==3.5
-python-apt==2.7.7+ubuntu3
 pytz==2024.1
 PyYAML==6.0.1
 requests==2.31.0
