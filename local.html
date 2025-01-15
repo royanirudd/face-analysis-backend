@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Face Analyzer</title>
+	<style>
+		body {
+			font-family: Arial, sans-serif;
+			margin: 0;
+			padding: 0;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			background-color: #f8f9fa;
+			padding: 20px;
+		}
+
+		h1 {
+			color: #333;
+		}
+
+		.container {
+			max-width: 800px;
+			width: 100%;
+			background: #fff;
+			border-radius: 8px;
+			padding: 20px;
+			box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+		}
+
+		.preview {
+			margin-top: 20px;
+			display: flex;
+			align-items: center;
+			flex-direction: column;
+		}
+
+		.preview img {
+			max-width: 100%;
+			max-height: 300px;
+			border: 1px solid #ddd;
+			border-radius: 8px;
+			margin-bottom: 20px;
+		}
+
+		.buttons {
+			display: flex;
+			justify-content: center;
+			gap: 10px;
+			margin-bottom: 20px;
+		}
+
+		button {
+			padding: 10px 20px;
+			border: none;
+			border-radius: 5px;
+			background-color: #007bff;
+			color: white;
+			cursor: pointer;
+			font-size: 16px;
+		}
+
+		button:hover {
+			background-color: #0056b3;
+		}
+
+		button.reset {
+			background-color: #dc3545;
+		}
+
+		button.reset:hover {
+			background-color: #a71d2a;
+		}
+
+		.results {
+			margin-top: 20px;
+		}
+
+		.keywords {
+			margin: 10px 0;
+			padding: 10px;
+			background: #e9ecef;
+			border-radius: 5px;
+		}
+
+		.product {
+			display: flex;
+			align-items: center;
+			gap: 15px;
+			padding: 10px;
+			margin-bottom: 10px;
+			border: 1px solid #ddd;
+			border-radius: 5px;
+		}
+
+		.product img {
+			width: 80px;
+			height: 80px;
+			object-fit: cover;
+			border-radius: 5px;
+		}
+
+		.product-info {
+			flex-grow: 1;
+		}
+
+		.product-info a {
+			text-decoration: none;
+			color: #007bff;
+		}
+
+		.product-info a:hover {
+			text-decoration: underline;
+		}
+
+		.product-info h4 {
+			margin: 0 0 5px 0;
+			font-size: 18px;
+		}
+
+		.product-info p {
+			margin: 0;
+			font-size: 14px;
+			color: #555;
+		}
+
+		.loading {
+			display: none;
+			margin-top: 20px;
+			font-size: 18px;
+			color: #555;
+			text-align: center;
+		}
+
+		.loader {
+			border: 4px solid #f3f3f3;
+			border-top: 4px solid #007bff;
+			border-radius: 50%;
+			width: 40px;
+			height: 40px;
+			animation: spin 1s linear infinite;
+			margin: 10px auto;
+		}
+
+		@keyframes spin {
+			0% {
+				transform: rotate(0deg);
+			}
+
+			100% {
+				transform: rotate(360deg);
+			}
+		}
+	</style>
+</head>
+
+<body>
+	<div class="container">
+		<h1>Face Analyzer</h1>
+		<div class="buttons">
+			<input type="file" id="fileUpload" accept="image/*" style="display: none;">
+			<button id="uploadButton">Upload Image</button>
+			<button id="resetButton" class="reset">Reset</button>
+		</div>
+		<div class="preview">
+			<img id="previewImage" alt="Image Preview" style="display: none;">
+		</div>
+		<div class="loading" id="loading">
+			<div class="loader"></div>
+			<p>Analyzing image, please wait...</p>
+		</div>
+		<div class="results" id="results" style="display: none;">
+			<h2>Keywords:</h2>
+			<div class="keywords" id="keywords"></div>
+			<h2>Product Recommendations:</h2>
+			<div id="products"></div>
+		</div>
+	</div>
+
+	<script>
+		const uploadButton = document.getElementById("uploadButton");
+		const resetButton = document.getElementById("resetButton");
+		const fileUpload = document.getElementById("fileUpload");
+		const previewImage = document.getElementById("previewImage");
+		const loading = document.getElementById("loading");
+		const results = document.getElementById("results");
+		const keywordsDiv = document.getElementById("keywords");
+		const productsDiv = document.getElementById("products");
+
+		const BACKEND_URL = "http://localhost:8000/analyze";
+
+		// Handle image upload
+		uploadButton.addEventListener("click", () => {
+			fileUpload.click();
+		});
+
+		fileUpload.addEventListener("change", async (event) => {
+			const file = event.target.files[0];
+			if (file) {
+				// Display image preview
+				const reader = new FileReader();
+				reader.onload = (e) => {
+					previewImage.src = e.target.result;
+					previewImage.style.display = "block";
+				};
+				reader.readAsDataURL(file);
+
+				// Show loading indicator
+				loading.style.display = "block";
+				results.style.display = "none";
+
+				// Send image to backend
+				const formData = new FormData();
+				formData.append("file", file);
+
+				try {
+					const response = await fetch(BACKEND_URL, {
+						method: "POST",
+						body: formData,
+					});
+
+					if (!response.ok) throw new Error("Failed to analyze image");
+
+					const data = await response.json();
+					displayResults(data);
+				} catch (error) {
+					alert("An error occurred while analyzing the image.");
+					console.error(error);
+				} finally {
+					// Hide loading indicator
+					loading.style.display = "none";
+				}
+			}
+		});
+
+		// Handle reset
+		resetButton.addEventListener("click", () => {
+			fileUpload.value = null;
+			previewImage.src = "";
+			previewImage.style.display = "none";
+			results.style.display = "none";
+			loading.style.display = "none";
+			keywordsDiv.innerHTML = "";
+			productsDiv.innerHTML = "";
+		});
+
+		// Display results
+		function displayResults(data) {
+			results.style.display = "block";
+
+			// Display keywords
+			keywordsDiv.innerHTML = data.analysis.keywords.join(", ");
+
+			// Display product recommendations
+			productsDiv.innerHTML = "";
+			data.recommendations.forEach((recommendation) => {
+				const category = document.createElement("h3");
+				category.textContent = recommendation.category;
+				productsDiv.appendChild(category);
+
+				recommendation.products.forEach((product) => {
+					const productDiv = document.createElement("div");
+					productDiv.classList.add("product");
+
+					const img = document.createElement("img");
+					img.src = product.image_url || "https://via.placeholder.com/80";
+					productDiv.appendChild(img);
+
+					const infoDiv = document.createElement("div");
+					infoDiv.classList.add("product-info");
+
+					const title = document.createElement("h4");
+					const link = document.createElement("a");
+					link.href = product.product_url;
+					link.target = "_blank";
+					link.textContent = product.title;
+					title.appendChild(link);
+					infoDiv.appendChild(title);
+
+					const price = document.createElement("p");
+					price.textContent = `Price: $${product.price || "N/A"}`;
+					infoDiv.appendChild(price);
+
+					const rating = document.createElement("p");
+					rating.textContent = `Rating: ${product.rating || "N/A"}`;
+					infoDiv.appendChild(rating);
+
+					productDiv.appendChild(infoDiv);
+					productsDiv.appendChild(productDiv);
+				});
+			});
+		}
+	</script>
+</body>
+
+</html>
