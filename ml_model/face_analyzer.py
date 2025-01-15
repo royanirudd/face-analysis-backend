@@ -22,7 +22,7 @@ class FaceAnalyzer:
         target_width, target_height = target_size
         height, width = image.shape[:2]
         
-        # Calculate scaling factor
+        # Calculate scaling factor to maintain aspect ratio
         scale = min(target_width / width, target_height / height)
         new_width = int(width * scale)
         new_height = int(height * scale)
@@ -30,13 +30,13 @@ class FaceAnalyzer:
         # Resize the image
         resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
         
-        # Create a black canvas and embed the resized image
-        canvas = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+        # Create a black canvas (square) and embed the resized image
+        square_canvas = np.zeros((target_height, target_width, 3), dtype=np.uint8)
         x_offset = (target_width - new_width) // 2
         y_offset = (target_height - new_height) // 2
-        canvas[y_offset:y_offset + new_height, x_offset:x_offset + new_width] = resized_image
+        square_canvas[y_offset:y_offset + new_height, x_offset:x_offset + new_width] = resized_image
         
-        return canvas
+        return square_canvas
 
     def _create_mask_from_landmarks(self, image: np.ndarray, landmarks, points: List[int]) -> np.ndarray:
         """Create a mask for specific facial regions using landmarks"""
@@ -287,6 +287,8 @@ class FaceAnalyzer:
         
         if image is None:
             raise ValueError("Failed to decode image")
+
+        image = self._resize_image(image)
 
         # Convert BGR to RGB
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
