@@ -6,3 +6,4 @@ fake-useragent==1.2.1
 backoff==2.2.1
 cryptography==41.0.7
 mediapipe==0.10.20
+python-multipart==0.0.6
