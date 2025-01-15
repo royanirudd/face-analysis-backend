@@ -18,6 +18,26 @@ class FaceAnalyzer:
         self.cheek_points = [123, 147, 192, 213, 123, 147, 192, 213]
         self.under_eye_points = [157, 158, 159, 160, 161, 246, 163, 144, 145, 153, 154, 155]
 
+    def _resize_image(self, image: np.ndarray, target_size: Tuple[int, int] = (512, 512)) -> np.ndarray:
+        target_width, target_height = target_size
+        height, width = image.shape[:2]
+        
+        # Calculate scaling factor
+        scale = min(target_width / width, target_height / height)
+        new_width = int(width * scale)
+        new_height = int(height * scale)
+        
+        # Resize the image
+        resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        
+        # Create a black canvas and embed the resized image
+        canvas = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+        x_offset = (target_width - new_width) // 2
+        y_offset = (target_height - new_height) // 2
+        canvas[y_offset:y_offset + new_height, x_offset:x_offset + new_width] = resized_image
+        
+        return canvas
+
     def _create_mask_from_landmarks(self, image: np.ndarray, landmarks, points: List[int]) -> np.ndarray:
         """Create a mask for specific facial regions using landmarks"""
         height, width = image.shape[:2]
