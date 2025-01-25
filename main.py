@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import List, Optional
 from pydantic import BaseModel
-import requests
+import aiohttp
+import asyncio
 from bs4 import BeautifulSoup
 import random
 import time
@@ -24,7 +25,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # More permissive for development
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["*"],
@@ -63,11 +64,10 @@ class FullResponse(BaseModel):
 class AmazonScraper:
     def __init__(self):
         self.ua = UserAgent()
-        self.session = requests.Session()
-        self.recommended_products = set()  # Track recommended products to avoid duplicates
+        self.recommended_products = set()
+        self.semaphore = asyncio.Semaphore(5)  # Limit concurrent requests
 
     def get_headers(self):
-        """Generate random headers for each request"""
         return {
             'User-Agent': self.ua.random,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -82,31 +82,18 @@ class AmazonScraper:
             'TE': 'Trailers'
         }
 
-    @backoff.on_exception(
-        backoff.expo,
-        (requests.exceptions.RequestException, Exception),
-        max_tries=3
-    )
-    def fetch_page(self, url):
-        """Fetch page with retry logic"""
-        try:
-            response = self.session.get(
-                url,
-                headers=self.get_headers(),
-                timeout=30
-            )
-            response.raise_for_status()
-            logger.info(f"Successfully fetched page: {url}")
-            return response.text
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching page {url}: {str(e)}")
-            raise
+    async def fetch_page(self, session, url):
+        async with self.semaphore:
+            try:
+                async with session.get(url, headers=self.get_headers(), timeout=30) as response:
+                    response.raise_for_status()
+                    return await response.text()
+            except Exception as e:
+                logger.error(f"Error fetching page {url}: {str(e)}")
+                return None
 
     def extract_product_details(self, item):
-        """Extract product details from a search result item"""
         try:
-            logger.debug(f"Processing item: {item}")
-
             asin = item.get('data-asin')
             if not asin:
                 asin = item.get('data-component-id')
@@ -124,6 +111,9 @@ class AmazonScraper:
                 item.select_one('.a-link-normal .a-text-normal')
             )
             
+            if not title_elem:
+                return None
+
             price_elem = (
                 item.select_one('span.a-price span.a-offscreen') or
                 item.select_one('span.a-price:not(.a-text-price) span.a-offscreen') or
@@ -148,10 +138,6 @@ class AmazonScraper:
                 item.select_one('.a-link-normal img')
             )
 
-            if not title_elem:
-                logger.debug(f"No title found for ASIN: {asin}")
-                return None
-
             title = title_elem.text.strip()
             
             price = None
@@ -160,7 +146,6 @@ class AmazonScraper:
                     price_text = price_elem.text.strip().replace('$', '').replace(',', '')
                     price = float(price_text)
                 except (ValueError, AttributeError):
-                    logger.debug(f"Could not parse price for {asin}")
                     pass
 
             rating = None
@@ -169,7 +154,6 @@ class AmazonScraper:
                     rating_text = rating_elem.text.split(' ')[0]
                     rating = float(rating_text)
                 except (ValueError, IndexError, AttributeError):
-                    logger.debug(f"Could not parse rating for {asin}")
                     pass
 
             reviews_count = None
@@ -178,12 +162,11 @@ class AmazonScraper:
                     reviews_text = reviews_elem.text.replace(',', '').replace('(', '').replace(')', '')
                     reviews_count = int(''.join(filter(str.isdigit, reviews_text)))
                 except (ValueError, AttributeError):
-                    logger.debug(f"Could not parse reviews count for {asin}")
                     pass
 
             image_url = image_elem.get('src') if image_elem else None
 
-            product = ProductDetails(
+            return ProductDetails(
                 title=title,
                 product_url=product_url,
                 price=price,
@@ -192,74 +175,55 @@ class AmazonScraper:
                 image_url=image_url
             )
 
-            logger.debug(f"Successfully extracted product: {product}")
-            return product
-
         except Exception as e:
             logger.error(f"Error extracting product details: {str(e)}")
             return None
 
-    def search_products(self, search_terms: List[str], num_products: int = 5) -> List[ProductDetails]:
+    async def search_products(self, search_terms: List[str], num_products: int = 5) -> List[ProductDetails]:
         try:
             search_query = quote_plus(" ".join(search_terms))
             url = f"https://www.amazon.com/s?k={search_query}&ref=nb_sb_noss"
             
-            logger.info(f"Searching Amazon with URL: {url}")
-            
-            html_content = self.fetch_page(url)
-            
-            logger.debug(f"Retrieved HTML content length: {len(html_content)}")
-            
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            products = []
-            processed_count = 0
-            
-            product_containers = (
-                soup.select('div[data-asin]:not([data-asin=""])') or
-                soup.select('.s-result-item[data-asin]:not([data-asin=""])') or
-                soup.select('.sg-col-inner')
-            )
-            
-            logger.info(f"Found {len(product_containers)} potential product containers")
-            
-            for item in product_containers:
-                if processed_count >= num_products:
-                    break
-                    
-                product = self.extract_product_details(item)
-                if product:
-                    products.append(product)
-                    self.recommended_products.add(product.product_url)
-                    processed_count += 1
-                    logger.debug(f"Added product: {product.title}")
-                    
-                time.sleep(random.uniform(0.5, 1.0))
-            
-            logger.info(f"Successfully extracted {len(products)} products")
-            return products
-            
+            async with aiohttp.ClientSession() as session:
+                html_content = await self.fetch_page(session, url)
+                if not html_content:
+                    return []
+
+                soup = BeautifulSoup(html_content, 'html.parser')
+                products = []
+                processed_count = 0
+                
+                product_containers = (
+                    soup.select('div[data-asin]:not([data-asin=""])') or
+                    soup.select('.s-result-item[data-asin]:not([data-asin=""])') or
+                    soup.select('.sg-col-inner')
+                )
+
+                for item in product_containers:
+                    if processed_count >= num_products:
+                        break
+                        
+                    product = self.extract_product_details(item)
+                    if product:
+                        products.append(product)
+                        self.recommended_products.add(product.product_url)
+                        processed_count += 1
+                        
+                    await asyncio.sleep(random.uniform(0.2, 0.5))
+
+                return products
+                
         except Exception as e:
             logger.error(f"Error searching products: {str(e)}")
             return []
 
 amazon_scraper = AmazonScraper()
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services on startup"""
-    logger.info("Initializing services...")
-
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {"message": "Face Analysis API is running"}
-
 @app.post("/analyze")
 async def analyze_face(file: UploadFile = File(...)):
     response_timeout = 120
     try:
-        max_size = 5 * 1024 * 1024  # 5MB
+        max_size = 5 * 1024 * 1024
         contents = await file.read()
         if len(contents) > max_size:
             return JSONResponse(
@@ -274,18 +238,7 @@ async def analyze_face(file: UploadFile = File(...)):
             )
 
         try:
-            logger.info(f"Analyzing image: {file.filename}")
-            
             analysis_result = face_analyzer.analyze_image(contents)
-            
-            logger.info("Face analysis completed successfully")
-            
-        except ValueError as e:
-            logger.error(f"Validation error during analysis: {str(e)}")
-            return JSONResponse(
-                status_code=400,
-                content={"detail": str(e)}
-            )
         except Exception as e:
             logger.error(f"Error during face analysis: {str(e)}")
             return JSONResponse(
@@ -295,7 +248,6 @@ async def analyze_face(file: UploadFile = File(...)):
 
         amazon_scraper.recommended_products.clear()
         
-        recommendations = []
         search_categories = []
         
         if analysis_result['skin_tone']['main_tone'] != "unknown":
@@ -318,28 +270,21 @@ async def analyze_face(file: UploadFile = File(...)):
                     "keywords": values + ["skincare"]
                 })
 
-        logger.info(f"Generated search categories: {search_categories}")
+        # Concurrent product searches
+        async def search_category(category):
+            products = await amazon_scraper.search_products(category["keywords"])
+            if products:
+                return {
+                    "category": category["category"],
+                    "keywords": category["keywords"],
+                    "products": [product.dict() for product in products]
+                }
+            return None
 
-        for category in search_categories:
-            try:
-                logger.info(f"Searching products for category: {category['category']}")
-                products = amazon_scraper.search_products(category["keywords"])
-                if products:
-                    product_dicts = [product.dict() for product in products]
-                    recommendations.append({
-                        "category": category["category"],
-                        "keywords": category["keywords"],
-                        "products": product_dicts
-                    })
-                    logger.info(f"Found {len(products)} products for {category['category']}")
-                else:
-                    logger.warning(f"No products found for {category['category']}")
-                    
-                time.sleep(random.uniform(1, 2))
-                
-            except Exception as e:
-                logger.error(f"Error searching products for {category['category']}: {str(e)}")
-                continue
+        tasks = [search_category(category) for category in search_categories]
+        recommendations = []
+        results = await asyncio.gather(*tasks)
+        recommendations = [r for r in results if r is not None]
 
         response_data = {
             "analysis": analysis_result,
@@ -360,7 +305,6 @@ async def analyze_face(file: UploadFile = File(...)):
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     return {
         "status": "healthy",
         "services": {
@@ -369,3 +313,6 @@ async def health_check():
         }
     }
 
+@app.get("/")
+async def root():
+    return {"message": "Face Analysis API is running"}
