@@ -1,3 +1,6 @@
+# Python files
+dedeuplicate_database.py
+
 # Ignore virtual environment
 venv/
 .env
