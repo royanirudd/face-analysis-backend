@@ -14,7 +14,11 @@ import backoff
 import logging
 from ml_model.face_analyzer import FaceAnalyzer
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -85,9 +89,12 @@ class AmazonScraper:
     async def fetch_page(self, session, url):
         async with self.semaphore:
             try:
+                logger.info(f"Fetching page: {url}")
                 async with session.get(url, headers=self.get_headers(), timeout=30) as response:
                     response.raise_for_status()
-                    return await response.text()
+                    html = await response.text()
+                    logger.info(f"Successfully fetched page: {url}")
+                    return html
             except Exception as e:
                 logger.error(f"Error fetching page {url}: {str(e)}")
                 return None
@@ -184,9 +191,12 @@ class AmazonScraper:
             search_query = quote_plus(" ".join(search_terms))
             url = f"https://www.amazon.com/s?k={search_query}&ref=nb_sb_noss"
             
+            logger.info(f"Starting search for terms: {search_terms}")
+            
             async with aiohttp.ClientSession() as session:
                 html_content = await self.fetch_page(session, url)
                 if not html_content:
+                    logger.warning("No HTML content retrieved")
                     return []
 
                 soup = BeautifulSoup(html_content, 'html.parser')
@@ -199,6 +209,8 @@ class AmazonScraper:
                     soup.select('.sg-col-inner')
                 )
 
+                logger.info(f"Found {len(product_containers)} potential products")
+
                 for item in product_containers:
                     if processed_count >= num_products:
                         break
@@ -208,9 +220,11 @@ class AmazonScraper:
                         products.append(product)
                         self.recommended_products.add(product.product_url)
                         processed_count += 1
+                        logger.info(f"Added product: {product.title[:50]}...")
                         
                     await asyncio.sleep(random.uniform(0.2, 0.5))
 
+                logger.info(f"Completed search. Found {len(products)} products")
                 return products
                 
         except Exception as e:
@@ -223,22 +237,27 @@ amazon_scraper = AmazonScraper()
 async def analyze_face(file: UploadFile = File(...)):
     response_timeout = 120
     try:
+        logger.info(f"Starting analysis for file: {file.filename}")
         max_size = 5 * 1024 * 1024
         contents = await file.read()
         if len(contents) > max_size:
+            logger.warning(f"File size exceeds limit: {len(contents)} bytes")
             return JSONResponse(
                 status_code=413,
                 content={"detail": "File too large. Maximum size is 5MB."}
             )
 
         if not file.content_type.startswith('image/'):
+            logger.warning(f"Invalid file type: {file.content_type}")
             return JSONResponse(
                 status_code=415,
                 content={"detail": "File type not supported. Please upload an image file."}
             )
 
         try:
+            logger.info("Starting face analysis...")
             analysis_result = face_analyzer.analyze_image(contents)
+            logger.info("Face analysis completed successfully")
         except Exception as e:
             logger.error(f"Error during face analysis: {str(e)}")
             return JSONResponse(
@@ -247,6 +266,7 @@ async def analyze_face(file: UploadFile = File(...)):
             )
 
         amazon_scraper.recommended_products.clear()
+        logger.info("Starting product recommendations search")
         
         search_categories = []
         
@@ -270,27 +290,34 @@ async def analyze_face(file: UploadFile = File(...)):
                     "keywords": values + ["skincare"]
                 })
 
-        # Concurrent product searches
+        logger.info(f"Generated {len(search_categories)} search categories")
+
         async def search_category(category):
+            logger.info(f"Searching products for category: {category['category']}")
             products = await amazon_scraper.search_products(category["keywords"])
             if products:
+                logger.info(f"Found {len(products)} products for {category['category']}")
                 return {
                     "category": category["category"],
                     "keywords": category["keywords"],
                     "products": [product.dict() for product in products]
                 }
+            logger.warning(f"No products found for {category['category']}")
             return None
 
+        logger.info("Starting concurrent product searches")
         tasks = [search_category(category) for category in search_categories]
         recommendations = []
         results = await asyncio.gather(*tasks)
         recommendations = [r for r in results if r is not None]
+        logger.info(f"Completed all product searches. Found recommendations in {len(recommendations)} categories")
 
         response_data = {
             "analysis": analysis_result,
             "recommendations": recommendations
         }
         
+        logger.info("Successfully completed analysis and recommendations")
         return JSONResponse(
             status_code=200,
             content=response_data
