@@ -44,9 +44,11 @@ class FullResponse(BaseModel):
     analysis: dict
     recommendations: List[ProductRecommendation]
 
+
 class ProductDatabase:
     def __init__(self):
         self.load_database()
+        self.recommended_products = set()  # Track all recommended products by URL
 
     def load_database(self):
         """Load product database from JSON file"""
@@ -58,15 +60,40 @@ class ProductDatabase:
             logger.error(f"Error loading product database: {str(e)}")
             self.database = []
 
+    def reset_recommendations(self):
+        """Reset the set of recommended products"""
+        self.recommended_products = set()
+
     def find_matching_products(self, category: str, keywords: List[str], num_products: int = 5) -> List[ProductDetails]:
-        """Find products matching category and keywords"""
+        """Find unique products matching category and keywords"""
         try:
             # Find matching category in database
-            matching_category = next(
-                (cat for cat in self.database 
-                 if cat["category"].lower() == category.lower()),
-                None
-            )
+            category_lower = category.lower()
+            matching_category = None
+            
+            # Map common variations of category names
+            category_mappings = {
+                "skincare for fair skin": ["skincare for fair skin", "fair skin"],
+                "skincare for medium skin": ["skincare for medium skin", "medium skin"],
+                "skincare for dark skin": ["skincare for dark skin", "dark skin"],
+                "acne treatment": ["acne treatment", "acne"],
+                "aging treatment": ["aging treatment", "anti aging", "aging"],
+                "dry skin treatment": ["dry skin treatment", "dry skin"],
+                "oily skin treatment": ["oily skin treatment", "oily skin"],
+                "sensitive skin treatment": ["sensitive skin treatment", "sensitive skin"],
+                "combination skin treatment": ["combination skin treatment", "combination skin"],
+                "texture treatment": ["texture treatment", "texture", "uneven texture"]
+            }
+            
+            # Find the matching category using the mappings
+            for cat in self.database:
+                cat_name = cat["category"].lower()
+                for mapped_category, variants in category_mappings.items():
+                    if category_lower in variants or cat_name in variants:
+                        matching_category = cat
+                        break
+                if matching_category:
+                    break
 
             if not matching_category:
                 logger.warning(f"No matching category found for: {category}")
@@ -75,14 +102,56 @@ class ProductDatabase:
             # Convert keywords to lowercase for case-insensitive matching
             keywords_lower = [k.lower() for k in keywords]
 
-            # Filter products that match the keywords
-            matching_products = []
+            # Score and filter products
+            scored_products = []
             for product in matching_category["products"]:
-                # Check if any keyword matches in the product title
-                if any(keyword in product["title"].lower() for keyword in keywords_lower):
-                    matching_products.append(ProductDetails(**product))
+                # Skip if product URL already recommended
+                if product["product_url"] in self.recommended_products:
+                    continue
 
-            return matching_products[:num_products]
+                title_lower = product["title"].lower()
+                score = sum(1 for keyword in keywords_lower if keyword in title_lower)
+                
+                # Include product if it matches keywords or as a potential backup
+                scored_products.append((
+                    score,
+                    product.get("rating", 0) or 0,
+                    product.get("reviews_count", 0) or 0,
+                    product
+                ))
+
+            # Sort products by score, rating, and review count
+            scored_products.sort(reverse=True, key=lambda x: (
+                x[0],  # Keyword match score
+                x[1],  # Rating
+                x[2]   # Review count
+            ))
+
+            # Select top unique products
+            selected_products = []
+            for _, _, _, product in scored_products:
+                if len(selected_products) >= num_products:
+                    break
+                    
+                product_url = product["product_url"]
+                if product_url not in self.recommended_products:
+                    selected_products.append(ProductDetails(**product))
+                    self.recommended_products.add(product_url)
+
+            # If we don't have enough products, try to add more from remaining products
+            if len(selected_products) < num_products:
+                remaining_products = [
+                    p[3] for p in scored_products 
+                    if p[3]["product_url"] not in self.recommended_products
+                ]
+                
+                for product in remaining_products:
+                    if len(selected_products) >= num_products:
+                        break
+                    selected_products.append(ProductDetails(**product))
+                    self.recommended_products.add(product["product_url"])
+
+            return selected_products
 
         except Exception as e:
             logger.error(f"Error finding matching products: {str(e)}")
@@ -173,9 +242,9 @@ async def analyze_face(file: UploadFile = File(...)):
                         "keywords": category["keywords"],
                         "products": [product.dict() for product in products]
                     })
-                    logger.info(f"Found {len(products)} products for {category['category']}")
+                    logger.info(f"Found {len(products)} unique products for {category['category']}")
                 else:
-                    logger.warning(f"No products found for {category['category']}")
+                    logger.warning(f"No unique products found for {category['category']}")
 
             except Exception as e:
                 logger.error(f"Error searching products for {category['category']}: {str(e)}")
